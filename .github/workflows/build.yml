@@ -1,0 +1,87 @@
+# Builds vanity-gpu on every push and pull request. A tag v* (e.g. v1.0.0) also publishes a
+# GitHub release with a ready-to-run Linux binary. GitHub's runners have no NVIDIA GPU, so
+# the job only compiles; `vanity-gpu selftest` must be run on a machine with a GPU.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed only to create the release on a tag
+
+env:
+  CUDA_PKG: "12-8"                     # apt package suffix of the CUDA toolkit
+  CUDA_HOME: /usr/local/cuda-12.8
+  # Turing (RTX 20xx), A100, Ampere (RTX 30xx), Ada (RTX 40xx), H100, Blackwell (RTX 50xx)
+  CUDA_ARCHS: "75;80;86;89;90;120"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the CUDA compiler and runtime (no driver)
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            cuda-nvcc-${CUDA_PKG} cuda-cudart-dev-${CUDA_PKG} g++-13 cmake
+          echo "$CUDA_HOME/bin" >> "$GITHUB_PATH"
+          "$CUDA_HOME/bin/nvcc" --version
+
+      - name: Version
+        id: ver
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="dev-${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        # VG_NATIVE_CPU=OFF: no -march=native, so the binary runs on any x86-64 CPU.
+        # --threads 0: nvcc compiles the GPU architectures in parallel.
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
+            -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHS" \
+            -DCMAKE_CUDA_FLAGS="--threads 0" \
+            -DVG_NATIVE_CPU=OFF \
+            -DVG_VERSION="${{ steps.ver.outputs.version }}"
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Check the binary starts
+        run: |
+          ./build/vanity-gpu --version
+          ldd ./build/vanity-gpu
+
+      - name: Package
+        run: |
+          name="vanity-gpu-${{ steps.ver.outputs.version }}-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp build/vanity-gpu README.md README.ru.md LICENSE "dist/$name/"
+          cp -r examples docs "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vanity-gpu-${{ steps.ver.outputs.version }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+      - name: Release (tags only)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --title "vanity-gpu ${{ steps.ver.outputs.version }}" --generate-notes

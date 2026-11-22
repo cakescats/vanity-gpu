@@ -1,0 +1,18 @@
+# build output
+build/
+__pycache__/
+*.o
+*.cubin
+
+# Search results contain private keys: never commit them.
+vanity-results*.txt
+*results*.txt
+*.keys
+*.json
+# personal lists and found addresses kept next to the binary
+/*.txt
+!/CMakeLists.txt
+
+# downloaded installers
+*.deb
+*.run
